@@ -1,0 +1,44 @@
+Here are the steps I used, so you can create the environment yourself next time.
+
+Open PowerShell in your project folder:
+
+cd D:\GitHub\DNInterviewPreparations
+
+Create a virtual environment named .venv. I used the full path to Python because that’s where Python is installed on this machine:
+
+& 'C:\Users\User\AppData\Local\Programs\Python\Python314\python.exe' -m venv .venv
+
+If the Python launcher is available on your machine, you can use this shorter command instead:
+
+py -3.14 -m venv .venv
+
+Activate the environment:
+.\.venv\Scripts\Activate.ps1
+
+
+Your prompt should then show (.venv). If PowerShell blocks activation scripts, you can still use the environment directly with .\.venv\Scripts\python.exe.
+
+python --version
+python -m pip --version
+
+
+Install packages as needed. For example:
+
+python -m pip install requests
+
+
+Ignore generated environment files in Git by adding this to .gitignore:
+
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+
+
+When you’re finished, deactivate the environment:
+
+deactivate
+
+

@@ -1,0 +1,5 @@
+[
+  {"name": "tests", "status": "failed", "duration": "45"},
+  {"name": null, "status": "failed", "duration": 20},
+  {"name": "build", "status": "success", "duration": 100}
+]
