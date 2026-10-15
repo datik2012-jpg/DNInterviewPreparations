@@ -1,0 +1,198 @@
+After git add . and git comit -m "new faile been added" we can check HEAD been looking to the same commit hash (this last one we have been pushed)
+
+ git commit -m "added new difff file"
+[main 4e51627] added new difff file
+ 1 file changed, 1 insertion(+)
+ create mode 100644 new_diffFile.txt
+
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git log -1 --oneline                
+4e51627 (HEAD -> main) added new difff file
+
+
+now i push the file to ORIGIN  to the github:
+
+.venv) PS D:\GitHub\DNInterviewPreparations> git push -u origin main
+Enumerating objects: 4, done.
+Counting objects: 100% (4/4), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (2/2), done.
+Writing objects: 100% (3/3), 283 bytes | 283.00 KiB/s, done.
+Total 3 (delta 1), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (1/1), completed with 1 local object.
+To https://github.com/datik2012-jpg/DNInterviewPreparations.git
+   393a9a0..4e51627  main -> main
+branch 'main' set up to track 'origin/main'.
+
+
+
+
+Now creaete new branch:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git branch feature/test
+(.venv) PS D:\GitHub\DNInterviewPreparations> git branch             
+  feature/test
+* main
+
+Switch to this new feature branch:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git checkout feature/test           
+Switched to branch 'feature/test'
+
+Validate with git status we are in the feature/test branch:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git status               
+On branch feature/test
+nothing to commit, working tree clean
+
+
+Now we want to do a change in the new_diffile.txt and then to see how diff works:
+
+I have modifed first line and added second line:
+
+lalalla
+newlala
+
+Now i will commit this to the branch feature/test and push to the github to feature/test branch:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git status
+On branch feature/test
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        modified:   new_diffFile.txt
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git commit -m "modified first line in the file and added second line"
+[feature/test 7be7db4] modified first line in the file and added second line
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+I do not push the feature/test to the GITHUB yet !!!! and next step want to see how git diff works with local changes
+
+////////////////////////////////////////////////////////////////////
+
+To see all diff between main and feature/test branches:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git diff main feature/test
+diff --git a/new_diffFile.txt b/new_diffFile.txt
+index 5eeccdf..cdcced4 100644
+--- a/new_diffFile.txt
++++ b/new_diffFile.txt
+@@ -1 +1,2 @@
+-lalallala
+\ No newline at end of file
++lalalla
++newlala
+\ No newline at end of file
+
+
+To see the diff but only FILE names:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git diff --name-only main feature/test
+new_diffFile.txt
+
+In case we want to see a summary we can add --stat:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git diff --stat main feature/test --stat            
+ new_diffFile.txt | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+///////////////////////////////How to compare the diff between my current local branch "feature/test" and REMOTE branch main  (which is origin/main) /////////
+
+A: do: git fetch
+B: 
+(.venv) PS D:\GitHub\DNInterviewPreparations> git diff --name-only origin/main feature/test       
+new_diffFile.txt
+
+or full view chnages:
+
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git diff origin/main feature/test            
+diff --git a/new_diffFile.txt b/new_diffFile.txt
+index 5eeccdf..cdcced4 100644
+--- a/new_diffFile.txt
++++ b/new_diffFile.txt
+@@ -1 +1,2 @@
+-lalallala
+\ No newline at end of file
++lalalla
++newlala
+
+///////////////////////////////I want to add in the main branch more YAMLS and later do exersize /////
+
+so swith to the main branch:
+(.venv) PS D:\GitHub\DNInterviewPreparations> git branch
+  feature/test
+* main
+
+create folder in the project and add two yamls with some content + one readme.md
+
+configs/app.yaml
+README.md
+configs/network.yml
+
+check the status after adding these files (README as well added to that folder):
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git status
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        modified:   get_changes_in_files.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        configs/
+
+created a COMMIT to the main branch:
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git commit -m "added few files for diff play"                        
+[main 8e3e7e7] added few files for diff play
+ 4 files changed, 12 insertions(+), 3 deletions(-)
+ create mode 100644 configs/README.md
+ create mode 100644 configs/app.yaml
+ create mode 100644 configs/network.yaml
+
+NOw we push this to origin/main:
+
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> git push -u origin main                      
+Enumerating objects: 9, done.
+Counting objects: 100% (9/9), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (4/4), done.
+Writing objects: 100% (7/7), 859 bytes | 859.00 KiB/s, done.
+Total 7 (delta 1), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (1/1), completed with 1 local object.
+To https://github.com/datik2012-jpg/DNInterviewPreparations.git
+   4e51627..8e3e7e7  main -> main
+branch 'main' set up to track 'origin/main'.
+
+///////////////////////////////////////Now when we run ut python code we see the DIFF ////////////////
+
+
+(.venv) PS D:\GitHub\DNInterviewPreparations> python .\get_changes_in_files.py             
+hello
+configs/README.md
+configs/app.yaml
+configs/network.yaml
+get_changes_in_files.py
+new_diffFile.txt
+
+code to run PS D:\GitHub\DNInterviewPreparations> python .\get_changes_in_files.py:
+
+import subprocess
+
+
+def get_changed_configs(current_branch: str, remote_branch: str, command="git diff --name-only") -> list[str]:
+    full_command = command + " " + remote_branch + " " + current_branch
+    result = subprocess.run(full_command, capture_output=True, text=True, timeout=5)
+    print(result.stdout.strip())
+
+
+if __name__ == "__main__":
+    print("hello")
+    #git diff --name-only main feature/test
+    
+    #get_changed_configs("git diff --name-only BASE HEAD")
+    #exlain we want to see only files name changes between REMOTE main branch and my local feature/test branch
+    get_changed_configs("feature/test", "origin/main")

@@ -1,0 +1,591 @@
+Первый вопрос для твоей роли:
+В GitHub Actions jobs выполняются на self-hosted runners в Kubernetes. Разработчики жалуются: pipeline раньше занимал 15 минут, теперь — 50.
+Как ты определишь, jobs долго ждут свободного runner или сами build/test стали выполняться медленнее? Что посмотришь первым?
+Ответь как на интервью, своими словами.
+
+
+
+
+Ты рассуждаешь правильно: сначала сравнить время ожидания job, затем длительность её выполнения и отдельных шагов. Уточнение: ожидание runner видно в состоянии job, а не обязательно в её обычных логах — выполнение ещё не началось.
+Как посмотреть в GitHub:
+Открой Repository → Actions → нужный workflow run → нужную job. Для выполнявшейся job посмотри длительность шагов: checkout, установка зависимостей, build, tests, upload artifacts. Сравни с предыдущим быстрым запуском того же workflow. Так найдёшь, какой именно шаг замедлился. GitHub Docs
+Если job ожидает runner, проверь сообщение об ожидании и требуемый runs-on в YAML. Затем открой Settings → Actions → Runners: есть ли подходящие runners, доступны ли они или заняты. Важно наличие подходящего runner: GitHub учитывает labels/groups, а не просто любой свободный runner. GitHub Docs
+Команды GitHub CLI — запускаются в каталоге репозитория, при установленном и авторизованном gh:
+# Последние запуски — здесь находишь RUN_ID
+gh run list --limit 10
+
+# Сведения о запуске и его jobs
+gh run view RUN_ID
+
+# Открыть запуск в браузере
+gh run view RUN_ID --web
+
+# Логи конкретной job
+gh run view --job JOB_ID --log
+
+RUN_ID — идентификатор запуска workflow, JOB_ID — отдельной job внутри него. Это разные идентификаторы. Take GitHub to the command line
+На интервью твой ответ можно сформулировать так:
+«Сначала разделю задержку на ожидание runner и выполнение job. Сравню длительности jobs и шагов с предыдущим нормальным запуском. Если задержка до старта — проверю доступность подходящих runners и их масштабирование. Если после старта — найду замедлившийся шаг и проверю его логи, ресурсы и кеш».
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+Продолжаем сценарий: выяснили, что job ждёт runner 35 минут, а сам build по-прежнему занимает 15 минут. 
+Runner pods находятся в Kubernetes в состоянии Pending. Какие команды ты выполнишь и что будешь искать?
+
+
+Если поды на офтендинг, это значит, что-то мешает им сделать деплой. Может быть лейбл не тот, нод, и может быть не хватает памяти в нод. Может не хватает места. Что-то мешает им сделать деплой.Какие команды, но, скорее всего, я буду делать команды Kubernetes pod describe, logs и смотреть, там уже ошибки и от них уже исходить.
+Направление правильное: проверяешь, что мешает runner pod запуститься, и начинаешь с describe.
+
+Уточнение: Pending не всегда означает, что pod не назначен на node. Он может уже быть назначен, но ждать скачивания образа или подготовки volumes.
+
+Начни так — ci-runners здесь пример namespace:
+
+kubectl get pods -n ci-runners -o wide
+kubectl describe pod RUNNER_POD -n ci-runners
+
+Смотри колонку NODE, затем Events внизу describe.
+
+Что видно	Что проверять
+FailedScheduling: Insufficient memory/cpu	Requests pod и доступную для планирования ёмкость nodes
+untolerated taint	Taints nodes и tolerations pod
+didn't match Pod's node affinity/selector	nodeSelector, affinity и labels nodes
+unbound ... PersistentVolumeClaims	PVC и предоставление диска
+ErrImagePull / ImagePullBackOff	Образ, доступ к registry, сеть
+
+kubectl logs полезен, когда контейнер уже запускался. Если scheduler ещё не назначил pod на node, логов приложения нет — главная информация в Events.
+Про «место» уточняй: свободная RAM, CPU, место на диске или число доступных pod slots — это разные причины.
+
+
+Все эти сообщения объясняют, что мешает pod запуститься, но относятся к разным этапам.
+1. Insufficient memory/cpu — не хватает ресурсов для размещения
+В pod задаются requests:
+resources:
+  requests:
+    cpu: "2"
+    memory: "4Gi"
+
+Это означает: scheduler должен найти node, где можно выделить 2 CPU и 4 GiB памяти по requests.
+Он учитывает allocatable node и requests уже размещённых pods. Даже если сейчас фактическое потребление маленькое, запрошенная ёмкость уже занята для планирования.
+Проверка:
+kubectl describe node NODE_NAME
+
+Смотри Allocatable и Allocated resources. kubectl top показывает фактическое потребление — это другой показатель.
+2. untolerated taint — node ограничивает размещение pods
+Taint ставится на node, например:
+dedicated=ci:NoSchedule
+
+Это означает: новые pods без подходящего разрешения сюда не размещать.
+Toleration задаётся в pod:
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: ci
+    effect: NoSchedule
+
+Она позволяет pod пройти это ограничение. Она не заставляет pod выбрать эту node и не отменяет проверку ресурсов.
+Используют, например, чтобы обычные приложения не попадали на nodes для CI.
+3. nodeSelector / affinity — pod требует определённые nodes
+На node есть labels:
+workload: ci
+
+Pod может потребовать такую метку:
+nodeSelector:
+  workload: ci
+
+Если подходящих nodes нет, pod не разместится.
+nodeSelector — простой обязательный выбор по labels. nodeAffinity позволяет задавать более сложные правила: обязательные условия или предпочтения.
+Проверить labels:
+kubectl get nodes --show-labels
+
+Запомни разницу: taint ограничивает вход на node, selector/affinity задаёт выбор со стороны pod.
+4. unbound PersistentVolumeClaims — запрос на хранилище ещё не обеспечен
+PVC — объект Kubernetes, которым приложение запрашивает хранилище, например диск на 20 GiB.
+Запрос должен связаться с PV, представляющим предоставленное хранилище. Часто диск создаётся автоматически через StorageClass и CSI-драйвер.
+Если это не получилось, pod может ждать. Причины: неправильный StorageClass, ошибка создания диска, неподходящая зона или отсутствие подходящего PV.
+kubectl get pvc -n ci-runners
+kubectl describe pvc PVC_NAME -n ci-runners
+
+Смотри состояние и Events. Pending у PVC иногда является нормальным ожиданием выбора node при WaitForFirstConsumer; важна конкретная причина в Events.
+5. ErrImagePull / ImagePullBackOff — не получается скачать образ
+Pod уже может быть назначен на node, но контейнеру нужен образ из registry:
+image: registry.example.com/runner:1.0
+
+Возможные причины:
+- Неверное имя образа или tag.
+- Нет прав на private registry.
+- Проблема сети или DNS.
+- Registry недоступен.
+ErrImagePull сообщает об ошибке скачивания. ImagePullBackOff означает, что Kubernetes делает паузы между повторными попытками.
+kubectl describe pod RUNNER_POD -n ci-runners
+
+В Events ищи конкретное сообщение: например, unauthorized, not found или timeout.
+Для всех пяти случаев первая команда — describe pod, а дальше проверяешь именно тот ресурс, на который указывает ошибка.
+
+
+
+
+
+Про scheduler ты ответил правильно: он учитывает requests.memory pod и уже запрошенную память на node относительно её allocatable, а не текущее потребление из kubectl top.
+Karpenter — контроллер, который создаёт новые worker nodes, когда pods не помещаются на существующих. В AWS он запускает подходящие EC2 instances. Когда новая node зарегистрируется и станет готова, scheduler сможет разместить там pod. Amazon EKS
+Для диагностики тебе нужно понимать три объекта:
+Объект	Для чего нужен
+NodePool	Правила выбора nodes: допустимые типы, зоны, Spot/On-Demand, taints и общий лимит ресурсов
+EC2NodeClass	Настройки AWS: образ ОС, IAM role node, subnets, security groups, диски
+NodeClaim	Запрос Karpenter на конкретную новую node; показывает этапы её создания
+
+
+Это объекты Kubernetes, поэтому их смотрят через kubectl. Karpenter
+Если новая node не появляется, проверяем по порядку.
+1. Сам Karpenter работает?
+kubectl get pods -A -l app.kubernetes.io/name=karpenter
+
+Из вывода узнаёшь namespace и имя pod. Затем:
+kubectl logs KARPENTER_POD -n KARPENTER_NAMESPACE --since=15m
+
+Ищешь сообщения о проблемном pod, несовместимых требованиях или ошибках AWS.
+2. Настройки разрешают создать подходящую node?
+kubectl get nodepools
+kubectl describe nodepool NODEPOOL_NAME
+
+kubectl get ec2nodeclasses
+kubectl describe ec2nodeclass NODECLASS_NAME
+
+Проверяешь Conditions/Events и ограничения:
+- Не достигнут ли общий NodePool.spec.limits.
+- Разрешены ли instances с достаточной памятью.
+- Совместимы ли правила NodePool с selector/affinity и tolerations pod.
+- Готов ли EC2NodeClass: найдены ли необходимые AWS ресурсы. Karpenter
+3. Karpenter уже пытался создать node?
+kubectl get nodeclaims
+kubectl describe nodeclaim NODECLAIM_NAME
+
+Conditions помогают отличить: instance не запустился, node не зарегистрировалась в Kubernetes или не стала готова. Дальше проверяешь указанную причину: IAM permissions, AWS quotas, доступность EC2 capacity, сеть или bootstrap node. Karpenter
+На интервью честно скажи:
+«С Karpenter в production я не работал. Понимаю его роль: создание nodes для unschedulable pods. Начал бы с логов контроллера, проверил NodePool и EC2NodeClass, затем NodeClaim, чтобы определить, на каком этапе остановилось создание node».
+
+Закрепим один момент: pod требует 8Gi памяти, а NodePool разрешает только instances с 4 GiB общей RAM. Поможет ли создание ещё трёх таких nodes?
+
+
+//////////////////////////////////////////////////////////////////////////// Docker investigation ///////////
+
+Python-лабораторную завершили. Теперь диагностика Docker.
+Контейнер ci-runner завершился во время build. Какие команды выполнишь, чтобы увидеть:
+1. Контейнер, включая остановленные.
+2. Последние 50 строк его логов.
+3. Его ExitCode и OOMKilled.
+Напиши команды, которые помнишь. Если забыл синтаксис — опиши, что хочешь проверить.
+
+
+
+
+PS D:\GitHub\BMCPolinexo> docker ps
+CONTAINER ID   IMAGE             COMMAND                  CREATED        STATUS                        PORTS                      NAMES
+8da405a3523d   bmcpolinexo-api   "uvicorn app.main:ap…"   17 hours ago   Up About a minute (healthy)   8000/tcp                   bmcpolinexo-api-1
+56ad7af186ca   bmcpolinexo-web   "nginx -g 'daemon of…"   18 hours ago   Up About a minute             127.0.0.1:8080->8080/tcp   bmcpolinexo-web-1
+PS D:\GitHub\BMCPolinexo> docker logs --tail bmcpolinexo-api
+docker: 'docker logs' requires 1 argument
+
+Usage:  docker logs [OPTIONS] CONTAINER
+
+Run 'docker logs --help' for more information
+PS D:\GitHub\BMCPolinexo> docker logs --tail 10 bmcpolinexo-api
+Error response from daemon: No such container: bmcpolinexo-api
+PS D:\GitHub\BMCPolinexo> docker logs --tail 10 8da405a3523d
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1]
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+PS D:\GitHub\BMCPolinexo> docker logs --tail 10 56ad7af186ca
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{json.state}"
+{json.state}
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{{json.State}}"
+
+template parsing error: template: :1:2: executing "" at <json>: wrong number of args for json: want 1 got 0
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{{json .State}}"
+{"Status":"running","Running":true,"Paused":false,"Restarting":false,"OOMKilled":false,"Dead":false,"Pid":459,"ExitCode":0,"Error":"","StartedAt":"2026-10-11T12:48:31.182222784Z","FinishedAt":"2026-10-11T06:18:37.6472016Z","Health":{"Status":"healthy","FailingStreak":0,"Log":[{"Start":"2026-10-11T12:53:01.544854084Z","End":"2026-10-11T12:53:01.899915365Z","ExitCode":0,"Output":""},{"Start":"2026-10-11T12:53:11.900950018Z","End":"2026-10-11T12:53:12.421079655Z","ExitCode":0,"Output":""},{"Start":"2026-10-11T12:53:22.421984493Z","End":"2026-10-11T12:53:22.77349083Z","ExitCode":0,"Output":""},{"Start":"2026-10-11T12:53:32.774905491Z","End":"2026-10-11T12:53:33.096058152Z","ExitCode":0,"Output":""},{"Start":"2026-10-11T12:53:43.094042791Z","End":"2026-10-11T12:53:43.435949861Z","ExitCode":0,"Output":""}]}}
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{{json .State.ExitCode}}"
+0
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{{json .State.End}}"
+
+template parsing error: template: :1:13: executing "" at <.State.End>: map has no entry for key "End"
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{{json .State.Restarting}}"
+false
+
+
+or full docker inspect:
+
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d
+[
+    {
+        "Id": "8da405a3523de2b70cab63c446fa768e7726fd286da86967e96f1d5b6170f881",
+        "Created": "2026-10-10T19:57:57.341413476Z",
+        "Path": "uvicorn",
+        "Args": [
+            "app.main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+            "--no-access-log"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 459,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-11T12:48:31.182222784Z",
+            "FinishedAt": "2026-10-11T06:18:37.6472016Z",
+            "Health": {
+                "Status": "healthy",
+                "FailingStreak": 0,
+                "Log": [
+                    {
+                        "Start": "2026-10-11T13:01:29.226926589Z",
+                        "End": "2026-10-11T13:01:29.567894524Z",
+                        "ExitCode": 0,
+                        "Output": ""
+                    },
+                    {
+                        "Start": "2026-10-11T13:01:39.568133665Z",
+                        "End": "2026-10-11T13:01:39.911159067Z",
+                        "ExitCode": 0,
+                        "Output": ""
+                    },
+                    {
+                        "Start": "2026-10-11T13:01:49.912091594Z",
+                        "End": "2026-10-11T13:01:50.234852097Z",
+                        "ExitCode": 0,
+                        "Output": ""
+                    },
+                    {
+                        "Start": "2026-10-11T13:02:00.235952161Z",
+                        "End": "2026-10-11T13:02:00.624401265Z",
+                        "ExitCode": 0,
+                        "Output": ""
+                    },
+                    {
+                        "Start": "2026-10-11T13:02:10.623220748Z",
+                        "End": "2026-10-11T13:02:11.006807587Z",
+                        "ExitCode": 0,
+                        "Output": ""
+                    }
+                ]
+            }
+        },
+        "Image": "sha256:a6b29fd50bb7558ff5adbb0b3605fb5d084752b2135d58dc16079195f6fcaa15",
+        "ResolvConfPath": "/var/lib/docker/containers/8da405a3523de2b70cab63c446fa768e7726fd286da86967e96f1d5b6170f881/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/8da405a3523de2b70cab63c446fa768e7726fd286da86967e96f1d5b6170f881/hostname",
+        "HostsPath": "/var/lib/docker/containers/8da405a3523de2b70cab63c446fa768e7726fd286da86967e96f1d5b6170f881/hosts",
+        "LogPath": "/var/lib/docker/containers/8da405a3523de2b70cab63c446fa768e7726fd286da86967e96f1d5b6170f881/8da405a3523de2b70cab63c446fa768e7726fd286da86967e96f1d5b6170f881-json.log",
+        "Name": "/bmcpolinexo-api-1",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "bmcpolinexo_default",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": [
+                "ALL"
+            ],
+            "CgroupnsMode": "private",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": [],
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": true,
+            "SecurityOpt": [
+                "no-new-privileges:true"
+            ],
+            "Tmpfs": {
+                "/tmp": "size=32m,mode=1777"
+            },
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 536870912,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": null,
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": null,
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 1073741824,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "8da405a3523d",
+            "Domainname": "",
+            "User": "appuser",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "ExposedPorts": {
+                "8000/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.12.15",
+                "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PYTHONUNBUFFERED=1"
+            ],
+            "Cmd": [
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
+                "--no-access-log"
+            ],
+            "Healthcheck": {
+                "Test": [
+                    "CMD",
+                    "python",
+                    "-c",
+                    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/instance', timeout=2)"
+                ],
+                "Interval": 10000000000,
+                "Timeout": 3000000000,
+                "Retries": 5
+            },
+            "Image": "bmcpolinexo-api",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": null,
+            "Labels": {
+                "com.docker.compose.config-hash": "5c271957ff5397708dc6cbdcda4ee50626ac7319074dfbbc8140ccc014a8b0b5",
+                "com.docker.compose.container-number": "1",
+                "com.docker.compose.depends_on": "",
+                "com.docker.compose.image": "sha256:d6404e4ab98a2c5a41f3380d9ae388585a9c4fb9f7b8207d1a4372a523ca44b3",
+                "com.docker.compose.oneoff": "False",
+                "com.docker.compose.project": "bmcpolinexo",
+                "com.docker.compose.project.config_files": "D:\\GitHub\\BMCPolinexo\\compose.yaml",
+                "com.docker.compose.project.working_dir": "D:\\GitHub\\BMCPolinexo",
+                "com.docker.compose.replace": "api-1",
+                "com.docker.compose.service": "api",
+                "com.docker.compose.version": "5.4.0"
+            }
+        },
+        "NetworkSettings": {
+            "SandboxID": "b60de3f06cdf23503d50e03de31b72e363e8f700d10bc3339444825fb9a4fefd",
+            "SandboxKey": "/var/run/docker/netns/b60de3f06cdf",
+            "Ports": {
+                "8000/tcp": null
+            },
+            "Networks": {
+                "bmcpolinexo_default": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": [
+                        "bmcpolinexo-api-1",
+                        "api"
+                    ],
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "005ed2233ad54cf8d2f105796c49ba04b77bfaf17ea60e0daf003ddaebed5122",
+                    "EndpointID": "315ea336b487d65cd08cb18ef59ad48992c94ff1d891ae13fdcd2d21f0df23f6",
+                    "Gateway": "172.20.0.1",
+                    "IPAddress": "172.20.0.2",
+                    "MacAddress": "36:92:7c:c1:59:3a",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": [
+                        "bmcpolinexo-api-1",
+                        "api",
+                        "8da405a3523d"
+                    ]
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:d6404e4ab98a2c5a41f3380d9ae388585a9c4fb9f7b8207d1a4372a523ca44b3",
+            "size": 1814,
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]
+
+/////////////////////////////////////////////////////////////////////
+
+
+If :
+Продолжим Docker-сценарий: inspect показал:
+{"ExitCode": 137, "OOMKilled": true}
+
+in docker inspect <container_name>
+
+
+"State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": true,
+            "Dead": false,
+            "Pid": 459,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-11T12:48:31.182222784Z",
+            "FinishedAt": "2026-10-11T06:18:37.6472016Z",
+
+Need to use docker logs <container name>
+
+PS D:\GitHub\BMCPolinexo> docker logs --tail 10 8da405a3523d
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1]
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+
+and cause OOMKilled we can inspect configured memory for this container:
+
+docker inspect 8da405a3523d --format "{{.HostConfig.Memory}}"
+
+# Настроенный лимит памяти, в байтах
+PS D:\GitHub\BMCPolinexo> docker inspect 8da405a3523d --format "{{.HostConfig.Memory}}"
+536870912
+
+converter: https://www.gigacalculator.com/converters/convert-bytes-to-mb.php?bb=536870912
+536870912 Bytes to MegByte(MB) is 512MB
+
+
+Если контейнер работает, фактическое потребление можно смотреть: docker stats 8da405a3523d
+
+CONTAINER ID   NAME                CPU %     MEM USAGE / LIMIT   MEM %     NET I/O         BLOCK I/O     PIDS
+8da405a3523d   bmcpolinexo-api-1   0.17%     58.36MiB / 512MiB   11.40%    1.82kB / 126B   43.9MB / 0B   1
+
+
+
+После завершения stats не покажет прошлый пик — нужны сохранённые метрики.
+Вопрос: если build запускает восемь тестовых процессов параллельно, что проверишь, чтобы понять, почему закончилась память?
+
+
+Да, логи процессов и память хоста нужно проверить. Но логи обычно не показывают, сколько памяти потреблял каждый процесс, поэтому нужны ещё метрики.
+Я бы разделил проверку:
+- Лимит контейнера: сколько памяти разрешено всему ci-runner.
+- Потребление процессов: сколько одновременно потребляют восемь тестовых процессов и сам build.
+- Память хоста: не закончилась ли RAM у всей машины.
+Например: контейнеру выделено 4 GiB, а каждый из восьми процессов потребляет около 700 MiB. Вместе это уже примерно 5,5 GiB, без остальных процессов. Контейнер может получить OOM, даже если на хосте ещё есть свободная память.
+Практическая проверка гипотезы: повторить тот же build с меньшей параллельностью и измерять память. Если с двумя процессами он проходит, а с восемью превышает лимит, это подтверждает связь с параллельностью. Само по себе это ещё не доказывает утечку.
+На интервью можно сказать:
+«Проверю лимит контейнера, пиковое потребление и число параллельных процессов. Сопоставлю с памятью хоста и повторю запуск с меньшей параллельностью под мониторингом».
+
+Следующий вопрос: контейнер имеет лимит 4 GiB, но на хосте свободно 20 GiB. Может ли контейнер всё равно получить OOM? Почему?
+
+////////////////////////////////////
+
+Текущее потребление и лимит вместе:
+
+PS D:\GitHub\BMCPolinexo> docker stats 8da405a3523d --no-stream
+CONTAINER ID   NAME                CPU %     MEM USAGE / LIMIT   MEM %     NET I/O         BLOCK I/O     PIDS
+8da405a3523d   bmcpolinexo-api-1   0.18%     57.95MiB / 512MiB   11.32%    1.82kB / 126B   43.9MB / 0B
+
+
